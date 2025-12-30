@@ -14,6 +14,7 @@ import { detectProject } from './services/detector/index.js';
 import { getGitService } from './services/git/index.js';
 import { getBuilderService } from './services/builder/index.js';
 import { getDeployerService } from './services/deployer/index.js';
+import { getBuildLogPublisher } from './routes/ws.js';
 
 const logger = createLogger('worker');
 
@@ -24,6 +25,7 @@ const consumers: Consumer[] = [];
 const gitService = getGitService('/tmp/zyphron/repos');
 const builderService = getBuilderService(config.docker.registry || 'localhost:5000');
 const deployerService = getDeployerService('zyphron-network', config.deployment.baseDomain || 'localhost');
+const logPublisher = getBuildLogPublisher();
 
 // ===========================================
 // DEPLOYMENT EVENT HANDLER
@@ -65,6 +67,10 @@ async function handleDeploymentEvent(topic: string, message: unknown): Promise<v
         await handleBuildCompleted(event);
         break;
 
+      case 'DEPLOYMENT_ROLLBACK':
+        await handleDeploymentRollback(event);
+        break;
+
       default:
         logger.warn({ type: event.type }, 'Unknown deployment event type');
     }
@@ -91,6 +97,15 @@ async function handleDeploymentCreated(event: DeploymentEvent): Promise<void> {
 
   const startTime = Date.now();
 
+  // Helper to publish logs
+  const publishLog = async (message: string, level: 'info' | 'warn' | 'error' = 'info', step?: string, progress?: number) => {
+    await logPublisher.publishLog(deploymentId, { level, message, step, progress });
+  };
+
+  // Publish initial status
+  await logPublisher.publishStatus(deploymentId, { status: 'BUILDING', message: 'Starting build...' });
+  await publishLog('🚀 Deployment started', 'info', 'init', 0);
+
   // Update deployment status to BUILDING
   await prisma.deployment.update({
     where: { id: deploymentId },
@@ -109,6 +124,7 @@ async function handleDeploymentCreated(event: DeploymentEvent): Promise<void> {
   });
 
   if (!project) {
+    await publishLog(`❌ Project ${projectId} not found`, 'error');
     throw new Error(`Project ${projectId} not found`);
   }
 
@@ -122,6 +138,7 @@ async function handleDeploymentCreated(event: DeploymentEvent): Promise<void> {
     // =============================================
     // STEP 1: Clone Repository
     // =============================================
+    await publishLog(`📦 Cloning repository: ${project.repoUrl}`, 'info', 'clone', 10);
     logger.info({ deploymentId, repoUrl: project.repoUrl }, 'Cloning repository');
 
     const cloneResult = await gitService.cloneRepository(
@@ -132,8 +149,11 @@ async function handleDeploymentCreated(event: DeploymentEvent): Promise<void> {
     );
 
     if (!cloneResult.success) {
+      await publishLog(`❌ Failed to clone: ${cloneResult.error}`, 'error', 'clone');
       throw new Error(`Failed to clone repository: ${cloneResult.error}`);
     }
+
+    await publishLog(`✅ Cloned commit ${cloneResult.commitHash.substring(0, 7)} (${cloneResult.branch})`, 'info', 'clone', 20);
 
     logger.info({
       deploymentId,
@@ -155,9 +175,12 @@ async function handleDeploymentCreated(event: DeploymentEvent): Promise<void> {
     // =============================================
     // STEP 2: Detect Project Framework
     // =============================================
+    await publishLog('🔍 Detecting project framework...', 'info', 'detect', 25);
     logger.info({ deploymentId }, 'Detecting project framework');
 
     const detection = await detectProject(cloneResult.path);
+
+    await publishLog(`✅ Detected: ${detection.framework} (${detection.language}) - confidence: ${detection.confidence}%`, 'info', 'detect', 30);
 
     logger.info({
       deploymentId,
@@ -170,6 +193,7 @@ async function handleDeploymentCreated(event: DeploymentEvent): Promise<void> {
     // =============================================
     // STEP 3: Build Docker Image
     // =============================================
+    await publishLog(`🔨 Building Docker image for ${detection.framework}...`, 'info', 'build', 35);
     logger.info({ deploymentId, framework: detection.framework }, 'Building Docker image');
 
     const buildLogs: string[] = [];
@@ -179,13 +203,15 @@ async function handleDeploymentCreated(event: DeploymentEvent): Promise<void> {
       projectId,
       detection,
       envVars,
-      onLog: (log) => {
+      onLog: async (log) => {
         buildLogs.push(log);
+        await publishLog(log, 'info', 'build');
         logger.debug({ deploymentId, log }, 'Build log');
       },
     });
 
     if (!buildResult.success) {
+      await publishLog(`❌ Build failed: ${buildResult.error}`, 'error', 'build');
       // Update deployment with build logs before failing
       await prisma.deployment.update({
         where: { id: deploymentId },
@@ -195,6 +221,8 @@ async function handleDeploymentCreated(event: DeploymentEvent): Promise<void> {
       });
       throw new Error(`Build failed: ${buildResult.error}`);
     }
+
+    await publishLog(`✅ Build completed in ${Math.round(buildResult.duration / 1000)}s`, 'info', 'build', 70);
 
     logger.info({
       deploymentId,
@@ -215,6 +243,7 @@ async function handleDeploymentCreated(event: DeploymentEvent): Promise<void> {
     // =============================================
     // STEP 4: Push Image to Registry
     // =============================================
+    await publishLog('📤 Pushing image to registry...', 'info', 'push', 75);
     logger.info({ deploymentId }, 'Pushing image to registry');
 
     const pushResult = await builderService.pushImage(
@@ -223,12 +252,18 @@ async function handleDeploymentCreated(event: DeploymentEvent): Promise<void> {
     );
 
     if (!pushResult.success) {
+      await publishLog(`⚠️ Push failed, using local image: ${pushResult.error}`, 'warn', 'push');
       logger.warn({ deploymentId, error: pushResult.error }, 'Failed to push image, continuing with local image');
+    } else {
+      await publishLog('✅ Image pushed to registry', 'info', 'push', 80);
     }
 
     // =============================================
     // STEP 5: Deploy Container
     // =============================================
+    await publishLog('🚢 Deploying container...', 'info', 'deploy', 85);
+    await logPublisher.publishStatus(deploymentId, { status: 'DEPLOYING', message: 'Starting container...' });
+    
     await prisma.deployment.update({
       where: { id: deploymentId },
       data: { status: 'DEPLOYING' },
@@ -257,8 +292,11 @@ async function handleDeploymentCreated(event: DeploymentEvent): Promise<void> {
     const deployDuration = Math.round((Date.now() - deployStartTime) / 1000);
 
     if (!deployResult.success) {
+      await publishLog(`❌ Deployment failed: ${deployResult.error}`, 'error', 'deploy');
       throw new Error(`Deployment failed: ${deployResult.error}`);
     }
+
+    await publishLog(`✅ Container deployed in ${deployDuration}s`, 'info', 'deploy', 95);
 
     logger.info({
       deploymentId,
@@ -270,6 +308,7 @@ async function handleDeploymentCreated(event: DeploymentEvent): Promise<void> {
     // =============================================
     // STEP 6: Cleanup and Finalize
     // =============================================
+    await publishLog('🧹 Cleaning up...', 'info', 'cleanup', 98);
 
     // Cleanup cloned repository
     await gitService.cleanup(deploymentId);
@@ -297,6 +336,22 @@ async function handleDeploymentCreated(event: DeploymentEvent): Promise<void> {
     });
 
     const totalDuration = Date.now() - startTime;
+    
+    // Final success messages
+    await publishLog(`🎉 Deployment complete! URL: ${deployResult.externalUrl}`, 'info', 'complete', 100);
+    await logPublisher.publishStatus(deploymentId, {
+      status: 'LIVE',
+      message: 'Deployment successful',
+      url: deployResult.externalUrl,
+      containerId: deployResult.containerId,
+    });
+    await logPublisher.publishProjectEvent(projectId, {
+      type: 'deployment_completed',
+      deploymentId,
+      message: `Deployment completed in ${Math.round(totalDuration / 1000)}s`,
+      metadata: { url: deployResult.externalUrl },
+    });
+
     logger.info({
       deploymentId,
       projectId,
@@ -312,6 +367,14 @@ async function handleDeploymentCreated(event: DeploymentEvent): Promise<void> {
       projectId,
       error: errorMessage,
     }, 'Deployment failed');
+
+    // Publish failure status
+    await logPublisher.publishStatus(deploymentId, { status: 'FAILED', message: errorMessage });
+    await logPublisher.publishProjectEvent(projectId, {
+      type: 'deployment_failed',
+      deploymentId,
+      message: errorMessage,
+    });
 
     // Update deployment status to FAILED
     await prisma.deployment.update({
@@ -355,9 +418,113 @@ async function handleBuildCompleted(event: DeploymentEvent): Promise<void> {
   logger.info({ deploymentId, buildId }, 'Build completion processed');
 }
 
+async function handleDeploymentRollback(event: DeploymentEvent): Promise<void> {
+  const { deploymentId, projectId, imageTag } = event as DeploymentEvent & { imageTag: string };
+
+  logger.info({ deploymentId, projectId, imageTag }, 'Processing deployment rollback');
+
+  const startTime = Date.now();
+
+  // Helper to publish logs
+  const publishLog = async (message: string, level: 'info' | 'warn' | 'error' = 'info', step?: string, progress?: number) => {
+    await logPublisher.publishLog(deploymentId, { level, message, step, progress });
+  };
+
+  await logPublisher.publishStatus(deploymentId, { status: 'DEPLOYING', message: 'Starting rollback...' });
+  await publishLog('⏪ Rollback initiated', 'info', 'init', 0);
+
+  try {
+    // Get project details
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      include: { envVariables: true },
+    });
+
+    if (!project) {
+      throw new Error('Project not found');
+    }
+
+    await publishLog(`Rolling back to image: ${imageTag}`, 'info', 'deploy', 20);
+
+    // Deploy the existing image (skip build entirely)
+    await publishLog('Deploying container with existing image...', 'info', 'deploy', 50);
+
+    const deployResult = await deployerService.deploy({
+      projectId,
+      deploymentId,
+      projectSlug: project.slug,
+      imageName: `${config.docker.registry}/${project.slug}`,
+      imageTag,
+      port: 3000,
+      envVars: project.envVariables.reduce((acc: Record<string, string>, v: { key: string; value: string }) => {
+        acc[v.key] = v.value;
+        return acc;
+      }, {}),
+      memory: project.memoryLimit,
+      cpu: project.cpuLimit,
+    });
+
+    if (!deployResult.success) {
+      throw new Error(deployResult.error || 'Deployment failed');
+    }
+
+    await publishLog('Container deployed successfully!', 'info', 'deploy', 80);
+
+    // Update deployment status
+    const duration = Date.now() - startTime;
+    
+    await prisma.deployment.update({
+      where: { id: deploymentId },
+      data: {
+        status: 'READY',
+        completedAt: new Date(),
+        url: `https://${project.subdomain}.${config.deployment.baseDomain}`,
+      },
+    });
+
+    await publishLog(`✅ Rollback complete in ${(duration / 1000).toFixed(2)}s`, 'info', 'complete', 100);
+    await logPublisher.publishStatus(deploymentId, { status: 'READY', message: 'Rollback complete!' });
+    await logPublisher.publishComplete(deploymentId, {
+      status: 'success',
+      duration,
+      url: `https://${project.subdomain}.${config.deployment.baseDomain}`,
+      imageTag,
+    });
+
+    logger.info({
+      deploymentId,
+      projectId,
+      imageTag,
+      duration,
+    }, 'Rollback deployment completed successfully');
+
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    
+    await publishLog(`❌ Rollback failed: ${errorMessage}`, 'error', 'error', 100);
+    await logPublisher.publishStatus(deploymentId, { status: 'FAILED', message: errorMessage });
+    await logPublisher.publishComplete(deploymentId, {
+      status: 'failed',
+      duration: Date.now() - startTime,
+      error: errorMessage,
+    });
+
+    await prisma.deployment.update({
+      where: { id: deploymentId },
+      data: {
+        status: 'FAILED',
+        completedAt: new Date(),
+        errorMessage,
+      },
+    });
+
+    throw error;
+  }
+}
+
 // ===========================================
 // BUILD LOG HANDLER
-// ===========================================
+// =========================================== 
 
 interface BuildLogMessage {
   deploymentId: string;

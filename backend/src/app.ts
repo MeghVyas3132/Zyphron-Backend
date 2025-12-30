@@ -25,6 +25,8 @@ import { envRoutes } from '@/routes/env.js';
 import { databaseRoutes } from '@/routes/databases.js';
 import { webhookRoutes } from '@/routes/webhooks.js';
 import { metricsRoutes } from '@/routes/metrics.js';
+import { websocketRoutes } from '@/routes/ws.js';
+import { domainRoutes } from '@/routes/domains.js';
 
 // ===========================================
 // CREATE APPLICATION
@@ -90,6 +92,22 @@ export async function createApp(): Promise<FastifyInstance> {
       files: 1,
     },
   });
+
+  // Raw body support for webhook signature verification
+  app.addContentTypeParser(
+    'application/json',
+    { parseAs: 'string' },
+    (_req: { raw: unknown }, body: string, done: (err: Error | null, result?: unknown) => void) => {
+      try {
+        // Store raw body for signature verification
+        (_req as FastifyRequest & { rawBody?: string }).rawBody = body;
+        const json = JSON.parse(body);
+        done(null, json);
+      } catch (err) {
+        done(err as Error);
+      }
+    }
+  );
 
   // WebSocket support
   await app.register(websocket);
@@ -221,7 +239,9 @@ export async function createApp(): Promise<FastifyInstance> {
   await app.register(envRoutes, { prefix: '/api/v1/projects' });
   await app.register(databaseRoutes, { prefix: '/api/v1/databases' });
   await app.register(webhookRoutes, { prefix: '/api/v1/webhooks' });
+  await app.register(domainRoutes, { prefix: '/api/v1' });
   await app.register(metricsRoutes, { prefix: '/metrics' });
+  await app.register(websocketRoutes);
 
   return app;
 }

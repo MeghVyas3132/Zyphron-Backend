@@ -132,6 +132,7 @@ model Project {
   subdomain         String    @unique
   customDomain      String?   @unique @map("custom_domain")
   autoDeploy        Boolean   @default(true) @map("auto_deploy")
+  webhookSecret     String?   @map("webhook_secret")
   
   // Resource limits
   cpuLimit          String    @default("1") @map("cpu_limit")

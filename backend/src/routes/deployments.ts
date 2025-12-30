@@ -470,6 +470,107 @@ export async function deploymentRoutes(app: FastifyInstance): Promise<void> {
     });
   });
 
+  // Rollback to a previous deployment (uses existing image - instant)
+  app.post('/deployments/:deploymentId/rollback', {
+    onRequest: [app.authenticate],
+  }, async (request: FastifyRequest<{ Params: { deploymentId: string } }>, reply: FastifyReply) => {
+    const userId = request.user?.sub as string;
+    const { deploymentId } = request.params;
+
+    const targetDeployment = await prisma.deployment.findFirst({
+      where: {
+        id: deploymentId,
+        status: 'READY',
+        project: {
+          OR: [
+            { userId },
+            { team: { members: { some: { userId, role: { in: ['OWNER', 'ADMIN', 'DEVELOPER'] } } } } },
+          ],
+        },
+      },
+      include: {
+        project: true,
+        build: true,
+      },
+    });
+
+    if (!targetDeployment) {
+      return reply.status(404).send({
+        success: false,
+        error: {
+          code: 'DEPLOYMENT_NOT_FOUND',
+          message: 'Deployment not found, not successful, or you do not have permission',
+        },
+      });
+    }
+
+    if (!targetDeployment.imageTag) {
+      return reply.status(400).send({
+        success: false,
+        error: {
+          code: 'NO_IMAGE',
+          message: 'Target deployment has no image to rollback to',
+        },
+      });
+    }
+
+    // Create rollback deployment (reuses existing image)
+    const rollbackDeployment = await prisma.deployment.create({
+      data: {
+        projectId: targetDeployment.projectId,
+        userId,
+        branch: targetDeployment.branch,
+        commitSha: targetDeployment.commitSha,
+        commitMessage: `Rollback to deployment ${deploymentId.slice(0, 8)}`,
+        environment: targetDeployment.environment,
+        status: 'DEPLOYING',
+        imageTag: targetDeployment.imageTag,
+        url: targetDeployment.url,
+      },
+    });
+
+    // Publish rollback event (skip build, go straight to deploy)
+    await producer.send({
+      topic: 'deployment-events',
+      messages: [{
+        key: targetDeployment.projectId,
+        value: JSON.stringify({
+          type: 'DEPLOYMENT_ROLLBACK',
+          deploymentId: rollbackDeployment.id,
+          projectId: targetDeployment.projectId,
+          userId,
+          environment: targetDeployment.environment,
+          imageTag: targetDeployment.imageTag,
+          rollbackFrom: deploymentId,
+          timestamp: new Date().toISOString(),
+        }),
+      }],
+    });
+
+    await publishEvent('deployments', {
+      type: 'DEPLOYMENT_ROLLBACK',
+      deploymentId: rollbackDeployment.id,
+      projectId: targetDeployment.projectId,
+      targetDeploymentId: deploymentId,
+    });
+
+    logger.info({
+      rollbackDeploymentId: rollbackDeployment.id,
+      targetDeploymentId: deploymentId,
+      projectId: targetDeployment.projectId,
+      imageTag: targetDeployment.imageTag,
+      userId,
+    }, 'Rollback initiated');
+
+    return reply.status(201).send({
+      success: true,
+      data: {
+        deployment: rollbackDeployment,
+        message: 'Rollback initiated, using existing image for instant deployment',
+      },
+    });
+  });
+
   // Get deployment logs
   app.get('/deployments/:deploymentId/logs', {
     onRequest: [app.authenticate],
