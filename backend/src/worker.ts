@@ -9,10 +9,21 @@ import { createConsumer, disconnectKafka, TOPICS } from './lib/kafka.js';
 import { prisma } from './lib/prisma.js';
 import { Consumer } from 'kafkajs';
 
+// Import deployment services
+import { detectProject } from './services/detector/index.js';
+import { getGitService } from './services/git/index.js';
+import { getBuilderService } from './services/builder/index.js';
+import { getDeployerService } from './services/deployer/index.js';
+
 const logger = createLogger('worker');
 
 // Store consumers for cleanup
 const consumers: Consumer[] = [];
+
+// Initialize services
+const gitService = getGitService('/tmp/zyphron/repos');
+const builderService = getBuilderService(config.docker.registry || 'localhost:5000');
+const deployerService = getDeployerService('zyphron-network', config.deployment.baseDomain || 'localhost');
 
 // ===========================================
 // DEPLOYMENT EVENT HANDLER
@@ -74,26 +85,20 @@ async function handleDeploymentEvent(topic: string, message: unknown): Promise<v
 }
 
 async function handleDeploymentCreated(event: DeploymentEvent): Promise<void> {
-  const { deploymentId, buildId, projectId } = event;
+  const { deploymentId, projectId } = event;
 
-  logger.info({ deploymentId, buildId, projectId }, 'Starting deployment build');
+  logger.info({ deploymentId, projectId }, 'Starting deployment build');
+
+  const startTime = Date.now();
 
   // Update deployment status to BUILDING
   await prisma.deployment.update({
     where: { id: deploymentId },
-    data: { status: 'BUILDING' },
+    data: { 
+      status: 'BUILDING',
+      startedAt: new Date(),
+    },
   });
-
-  // Update build status to BUILDING
-  if (buildId) {
-    await prisma.build.update({
-      where: { id: buildId },
-      data: {
-        status: 'BUILDING',
-        startedAt: new Date(),
-      },
-    });
-  }
 
   // Get project details
   const project = await prisma.project.findUnique({
@@ -107,50 +112,222 @@ async function handleDeploymentCreated(event: DeploymentEvent): Promise<void> {
     throw new Error(`Project ${projectId} not found`);
   }
 
-  // TODO: Implement actual build logic
-  // 1. Clone repository
-  // 2. Detect language/framework
-  // 3. Build Docker image
-  // 4. Push to registry
-  // 5. Deploy container
-
-  logger.info({ deploymentId, projectId }, 'Build started (placeholder)');
-
-  // Simulate build process for now
-  await new Promise(resolve => setTimeout(resolve, 5000));
-
-  // Update build status to SUCCESS (placeholder)
-  if (buildId) {
-    await prisma.build.update({
-      where: { id: buildId },
-      data: {
-        status: 'SUCCESS',
-        finishedAt: new Date(),
-        duration: 5000,
-        imageUrl: `registry.local/${project.slug}:${event.commitSha || 'latest'}`,
-      },
-    });
+  // Prepare environment variables
+  const envVars: Record<string, string> = {};
+  for (const envVar of project.envVariables) {
+    envVars[envVar.key] = envVar.value;
   }
 
-  // Update deployment status to DEPLOYING
-  await prisma.deployment.update({
-    where: { id: deploymentId },
-    data: { status: 'DEPLOYING' },
-  });
+  try {
+    // =============================================
+    // STEP 1: Clone Repository
+    // =============================================
+    logger.info({ deploymentId, repoUrl: project.repoUrl }, 'Cloning repository');
 
-  // Simulate deploy process
-  await new Promise(resolve => setTimeout(resolve, 2000));
+    const cloneResult = await gitService.cloneRepository(
+      project.repoUrl,
+      deploymentId,
+      event.branch || project.defaultBranch || 'main',
+      project.gitToken || undefined
+    );
 
-  // Update deployment status to READY
-  await prisma.deployment.update({
-    where: { id: deploymentId },
-    data: {
-      status: 'READY',
-      finishedAt: new Date(),
-    },
-  });
+    if (!cloneResult.success) {
+      throw new Error(`Failed to clone repository: ${cloneResult.error}`);
+    }
 
-  logger.info({ deploymentId, projectId }, 'Deployment completed successfully (placeholder)');
+    logger.info({
+      deploymentId,
+      commitHash: cloneResult.commitHash.substring(0, 7),
+      branch: cloneResult.branch,
+    }, 'Repository cloned successfully');
+
+    // Update deployment with commit info
+    await prisma.deployment.update({
+      where: { id: deploymentId },
+      data: {
+        commitSha: cloneResult.commitHash,
+        commitMessage: cloneResult.commitMessage,
+        commitAuthor: cloneResult.author,
+        branch: cloneResult.branch,
+      },
+    });
+
+    // =============================================
+    // STEP 2: Detect Project Framework
+    // =============================================
+    logger.info({ deploymentId }, 'Detecting project framework');
+
+    const detection = await detectProject(cloneResult.path);
+
+    logger.info({
+      deploymentId,
+      framework: detection.framework,
+      language: detection.language,
+      packageManager: detection.packageManager,
+      confidence: detection.confidence,
+    }, 'Project detected');
+
+    // =============================================
+    // STEP 3: Build Docker Image
+    // =============================================
+    logger.info({ deploymentId, framework: detection.framework }, 'Building Docker image');
+
+    const buildLogs: string[] = [];
+    const buildResult = await builderService.buildImage({
+      projectPath: cloneResult.path,
+      deploymentId,
+      projectId,
+      detection,
+      envVars,
+      onLog: (log) => {
+        buildLogs.push(log);
+        logger.debug({ deploymentId, log }, 'Build log');
+      },
+    });
+
+    if (!buildResult.success) {
+      // Update deployment with build logs before failing
+      await prisma.deployment.update({
+        where: { id: deploymentId },
+        data: {
+          buildLogs: buildLogs.join('\n'),
+        },
+      });
+      throw new Error(`Build failed: ${buildResult.error}`);
+    }
+
+    logger.info({
+      deploymentId,
+      imageId: buildResult.imageId,
+      duration: buildResult.duration,
+    }, 'Docker image built successfully');
+
+    // Update deployment with build info
+    await prisma.deployment.update({
+      where: { id: deploymentId },
+      data: {
+        imageTag: `${buildResult.imageName}:${buildResult.imageTag}`,
+        buildLogs: buildResult.buildLogs.join('\n'),
+        buildDuration: Math.round(buildResult.duration / 1000),
+      },
+    });
+
+    // =============================================
+    // STEP 4: Push Image to Registry
+    // =============================================
+    logger.info({ deploymentId }, 'Pushing image to registry');
+
+    const pushResult = await builderService.pushImage(
+      buildResult.imageName,
+      buildResult.imageTag
+    );
+
+    if (!pushResult.success) {
+      logger.warn({ deploymentId, error: pushResult.error }, 'Failed to push image, continuing with local image');
+    }
+
+    // =============================================
+    // STEP 5: Deploy Container
+    // =============================================
+    await prisma.deployment.update({
+      where: { id: deploymentId },
+      data: { status: 'DEPLOYING' },
+    });
+
+    logger.info({ deploymentId }, 'Deploying container');
+
+    const deployStartTime = Date.now();
+    const deployResult = await deployerService.deploy({
+      deploymentId,
+      projectId,
+      projectSlug: project.slug,
+      imageName: buildResult.imageName,
+      imageTag: buildResult.imageTag,
+      envVars,
+      port: detection.port,
+      detection,
+      healthCheck: {
+        path: '/health',
+        interval: 30,
+        timeout: 10,
+        retries: 3,
+        startPeriod: 60,
+      },
+    });
+    const deployDuration = Math.round((Date.now() - deployStartTime) / 1000);
+
+    if (!deployResult.success) {
+      throw new Error(`Deployment failed: ${deployResult.error}`);
+    }
+
+    logger.info({
+      deploymentId,
+      containerId: deployResult.containerId,
+      internalUrl: deployResult.internalUrl,
+      externalUrl: deployResult.externalUrl,
+    }, 'Container deployed successfully');
+
+    // =============================================
+    // STEP 6: Cleanup and Finalize
+    // =============================================
+
+    // Cleanup cloned repository
+    await gitService.cleanup(deploymentId);
+
+    // Cleanup old deployments for this project (keep last 3)
+    await deployerService.cleanupOldDeployments(projectId, 3);
+
+    // Update deployment to LIVE
+    await prisma.deployment.update({
+      where: { id: deploymentId },
+      data: {
+        status: 'LIVE',
+        completedAt: new Date(),
+        deployDuration,
+        metadata: {
+          containerId: deployResult.containerId,
+          containerName: deployResult.containerName,
+          internalUrl: deployResult.internalUrl,
+          externalUrl: deployResult.externalUrl,
+          port: deployResult.port,
+          framework: detection.framework,
+          language: detection.language,
+        },
+      },
+    });
+
+    const totalDuration = Date.now() - startTime;
+    logger.info({
+      deploymentId,
+      projectId,
+      duration: totalDuration,
+      url: deployResult.externalUrl,
+    }, 'Deployment completed successfully');
+
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    
+    logger.error({
+      deploymentId,
+      projectId,
+      error: errorMessage,
+    }, 'Deployment failed');
+
+    // Update deployment status to FAILED
+    await prisma.deployment.update({
+      where: { id: deploymentId },
+      data: {
+        status: 'FAILED',
+        completedAt: new Date(),
+        errorMessage,
+      },
+    });
+
+    // Cleanup cloned repository on failure
+    await gitService.cleanup(deploymentId);
+
+    throw error; // Re-throw to be handled by parent
+  }
 }
 
 async function handleDeploymentCancelled(event: DeploymentEvent): Promise<void> {
