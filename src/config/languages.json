@@ -1,0 +1,149 @@
+{
+  "node": {
+    "detect": ["package.json"],
+    "type": "backend",
+    "dockerfile": "FROM node:18-alpine\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci --only=production || npm install --production\nCOPY . .\nEXPOSE 3000\nCMD [\"node\", \"server.js\"]",
+    "start": "node server.js",
+    "internalPort": 3000
+  },
+  "python": {
+    "detect": ["requirements.txt", "app.py", "main.py", "wsgi.py"],
+    "type": "backend",
+    "dockerfile": "FROM python:3.11-alpine\nWORKDIR /app\nCOPY requirements.txt ./\nRUN pip install --no-cache-dir -r requirements.txt\nCOPY . .\nEXPOSE 5000\nCMD [\"python\", \"app.py\"]",
+    "start": "python app.py",
+    "internalPort": 5000
+  },
+  "java": {
+    "detect": ["pom.xml", "build.gradle"],
+    "type": "backend",
+    "dockerfile": "FROM maven:3.9.5-eclipse-temurin-17 AS build\nWORKDIR /app\nCOPY . .\nRUN mvn clean package -DskipTests\nRUN find /app/target -name \"*.jar\" -exec cp {} /app/app.jar \\;\n\nFROM eclipse-temurin:17-jre-alpine\nWORKDIR /app\nCOPY --from=build /app/app.jar .\nEXPOSE 8080\nCMD [\"java\", \"-jar\", \"app.jar\"]",
+    "start": "java -jar app.jar",
+    "internalPort": 8080
+  },
+  "php": {
+    "detect": ["index.php", "composer.json"],
+    "type": "backend",
+    "dockerfile": "FROM php:8.2-apache\nRUN docker-php-ext-install pdo pdo_mysql mysqli\nWORKDIR /var/www/html\nCOPY . .\nRUN chown -R www-data:www-data /var/www/html\nEXPOSE 80\nCMD [\"apache2-foreground\"]",
+    "start": "php -S 0.0.0.0:8000 -t .",
+    "internalPort": 80
+  },
+  "react": {
+    "detect": ["package.json"],
+    "type": "static-build",
+    "dockerfile": "FROM node:18-alpine AS build\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci || npm install\nCOPY . .\nRUN npm run build\n\nFROM nginx:alpine\nCOPY --from=build /app/build /usr/share/nginx/html\nCOPY --from=build /app/dist /usr/share/nginx/html\nRUN echo 'server { listen 80; location / { root /usr/share/nginx/html; index index.html; try_files $uri $uri/ /index.html; } }' > /etc/nginx/conf.d/default.conf\nEXPOSE 80\nCMD [\"nginx\", \"-g\", \"daemon off;\"]",
+    "start": "npm run start",
+    "internalPort": 80
+  },
+  "vue": {
+    "detect": ["package.json"],
+    "type": "static-build",
+    "dockerfile": "FROM node:18-alpine AS build\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci || npm install\nCOPY . .\nRUN npm run build\n\nFROM nginx:alpine\nCOPY --from=build /app/dist /usr/share/nginx/html\nRUN echo 'server { listen 80; location / { root /usr/share/nginx/html; index index.html; try_files $uri $uri/ /index.html; } }' > /etc/nginx/conf.d/default.conf\nEXPOSE 80\nCMD [\"nginx\", \"-g\", \"daemon off;\"]",
+    "start": "npm run serve",
+    "internalPort": 80
+  },
+  "angular": {
+    "detect": ["angular.json", "package.json"],
+    "type": "static-build",
+    "dockerfile": "FROM node:18-alpine AS build\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci || npm install\nCOPY . .\nRUN npm run build -- --configuration production\n\nFROM nginx:alpine\nCOPY --from=build /app/dist /usr/share/nginx/html\nRUN echo 'server { listen 80; location / { root /usr/share/nginx/html; index index.html; try_files $uri $uri/ /index.html; } }' > /etc/nginx/conf.d/default.conf\nEXPOSE 80\nCMD [\"nginx\", \"-g\", \"daemon off;\"]",
+    "start": "npm run start",
+    "internalPort": 80
+  },
+  "svelte": {
+    "detect": ["svelte.config.js", "package.json"],
+    "type": "static-build",
+    "dockerfile": "FROM node:18-alpine AS build\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci || npm install\nCOPY . .\nRUN npm run build\n\nFROM nginx:alpine\nCOPY --from=build /app/build /usr/share/nginx/html\nCOPY --from=build /app/dist /usr/share/nginx/html\nRUN echo 'server { listen 80; location / { root /usr/share/nginx/html; index index.html; try_files $uri $uri/ /index.html; } }' > /etc/nginx/conf.d/default.conf\nEXPOSE 80\nCMD [\"nginx\", \"-g\", \"daemon off;\"]",
+    "start": "npm run dev",
+    "internalPort": 80
+  },
+  "next": {
+    "detect": ["next.config.js", "next.config.mjs", "next.config.ts"],
+    "type": "backend",
+    "dockerfile": "FROM node:18-alpine AS deps\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci || npm install\n\nFROM node:18-alpine AS builder\nWORKDIR /app\nCOPY --from=deps /app/node_modules ./node_modules\nCOPY . .\nRUN npm run build\n\nFROM node:18-alpine AS runner\nWORKDIR /app\nENV NODE_ENV production\nRUN addgroup --system --gid 1001 nodejs\nRUN adduser --system --uid 1001 nextjs\nCOPY --from=builder /app/public ./public\nCOPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./\nCOPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static\nUSER nextjs\nEXPOSE 3000\nENV PORT 3000\nCMD [\"node\", \"server.js\"]",
+    "start": "npm start",
+    "internalPort": 3000
+  },
+  "nuxt": {
+    "detect": ["nuxt.config.js", "nuxt.config.ts"],
+    "type": "backend",
+    "dockerfile": "FROM node:18-alpine AS build\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci || npm install\nCOPY . .\nRUN npm run build\n\nFROM node:18-alpine\nWORKDIR /app\nCOPY --from=build /app/.output ./\nEXPOSE 3000\nCMD [\"node\", \"server/index.mjs\"]",
+    "start": "npm start",
+    "internalPort": 3000
+  },
+  "dotnet": {
+    "detect": [".csproj", ".sln"],
+    "type": "backend",
+    "dockerfile": "FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build\nWORKDIR /src\nCOPY . .\nRUN dotnet restore\nRUN dotnet publish -c Release -o /app/publish\n\nFROM mcr.microsoft.com/dotnet/aspnet:8.0\nWORKDIR /app\nCOPY --from=build /app/publish .\nEXPOSE 80\nENTRYPOINT [\"dotnet\"]\nCMD [\"*.dll\"]",
+    "start": "dotnet run",
+    "internalPort": 80
+  },
+  "flutter": {
+    "detect": ["pubspec.yaml"],
+    "type": "static-build",
+    "dockerfile": "FROM ghcr.io/cirruslabs/flutter:stable AS build\nWORKDIR /app\nCOPY pubspec.* ./\nRUN flutter pub get\nCOPY . .\nRUN flutter build web --release\n\nFROM nginx:alpine\nCOPY --from=build /app/build/web /usr/share/nginx/html\nRUN echo 'server { listen 80; location / { root /usr/share/nginx/html; index index.html; try_files $uri $uri/ /index.html; } }' > /etc/nginx/conf.d/default.conf\nEXPOSE 80\nCMD [\"nginx\", \"-g\", \"daemon off;\"]",
+    "start": "flutter run -d web-server",
+    "internalPort": 80
+  },
+  "go": {
+    "detect": ["go.mod"],
+    "type": "backend",
+    "dockerfile": "FROM golang:1.21-alpine AS builder\nWORKDIR /app\nCOPY go.mod go.sum ./\nRUN go mod download\nCOPY . .\nRUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main .\n\nFROM alpine:latest\nRUN apk --no-cache add ca-certificates\nWORKDIR /root/\nCOPY --from=builder /app/main .\nEXPOSE 8080\nCMD [\"./main\"]",
+    "start": "go run main.go",
+    "internalPort": 8080
+  },
+  "rust": {
+    "detect": ["Cargo.toml"],
+    "type": "backend",
+    "dockerfile": "FROM rust:1.75-alpine AS builder\nRUN apk add --no-cache musl-dev\nWORKDIR /app\nCOPY Cargo.toml Cargo.lock ./\nRUN mkdir src && echo 'fn main() {}' > src/main.rs\nRUN cargo build --release\nRUN rm -rf src\nCOPY . .\nRUN touch src/main.rs\nRUN cargo build --release\n\nFROM alpine:latest\nRUN apk --no-cache add ca-certificates\nWORKDIR /root/\nCOPY --from=builder /app/target/release/app .\nEXPOSE 8080\nCMD [\"./app\"]",
+    "start": "cargo run",
+    "internalPort": 8080
+  },
+  "django": {
+    "detect": ["manage.py", "requirements.txt"],
+    "type": "backend",
+    "dockerfile": "FROM python:3.11-alpine\nWORKDIR /app\nRUN apk add --no-cache postgresql-dev gcc python3-dev musl-dev\nCOPY requirements.txt ./\nRUN pip install --no-cache-dir -r requirements.txt gunicorn\nCOPY . .\nRUN python manage.py collectstatic --noinput || true\nEXPOSE 8000\nCMD [\"gunicorn\", \"--bind\", \"0.0.0.0:8000\", \"--workers\", \"3\", \"wsgi:application\"]",
+    "start": "python manage.py runserver 0.0.0.0:8000",
+    "internalPort": 8000
+  },
+  "flask": {
+    "detect": ["app.py", "requirements.txt"],
+    "type": "backend",
+    "dockerfile": "FROM python:3.11-alpine\nWORKDIR /app\nCOPY requirements.txt ./\nRUN pip install --no-cache-dir -r requirements.txt gunicorn\nCOPY . .\nEXPOSE 5000\nCMD [\"gunicorn\", \"--bind\", \"0.0.0.0:5000\", \"--workers\", \"3\", \"app:app\"]",
+    "start": "python app.py",
+    "internalPort": 5000
+  },
+  "fastapi": {
+    "detect": ["main.py", "requirements.txt"],
+    "type": "backend",
+    "dockerfile": "FROM python:3.11-alpine\nWORKDIR /app\nCOPY requirements.txt ./\nRUN pip install --no-cache-dir -r requirements.txt uvicorn\nCOPY . .\nEXPOSE 8000\nCMD [\"uvicorn\", \"main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8000\"]",
+    "start": "uvicorn main:app --reload",
+    "internalPort": 8000
+  },
+  "express": {
+    "detect": ["package.json", "server.js", "index.js"],
+    "type": "backend",
+    "dockerfile": "FROM node:18-alpine\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci --only=production || npm install --production\nCOPY . .\nEXPOSE 3000\nCMD [\"node\", \"server.js\"]",
+    "start": "node server.js",
+    "internalPort": 3000
+  },
+  "gatsby": {
+    "detect": ["gatsby-config.js", "gatsby-config.ts"],
+    "type": "static-build",
+    "dockerfile": "FROM node:18-alpine AS build\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci || npm install\nCOPY . .\nRUN npm run build\n\nFROM nginx:alpine\nCOPY --from=build /app/public /usr/share/nginx/html\nRUN echo 'server { listen 80; location / { root /usr/share/nginx/html; index index.html; try_files $uri $uri/ /index.html; } }' > /etc/nginx/conf.d/default.conf\nEXPOSE 80\nCMD [\"nginx\", \"-g\", \"daemon off;\"]",
+    "start": "npm run develop",
+    "internalPort": 80
+  },
+  "laravel": {
+    "detect": ["artisan", "composer.json"],
+    "type": "backend",
+    "dockerfile": "FROM php:8.2-fpm-alpine\nRUN apk add --no-cache nginx supervisor\nRUN docker-php-ext-install pdo pdo_mysql mysqli\nWORKDIR /var/www/html\nCOPY --from=composer:latest /usr/bin/composer /usr/bin/composer\nCOPY composer*.json ./\nRUN composer install --no-dev --no-scripts --no-autoloader\nCOPY . .\nRUN composer dump-autoload --optimize\nRUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache\nEXPOSE 80\nCMD [\"php\", \"artisan\", \"serve\", \"--host=0.0.0.0\", \"--port=80\"]",
+    "start": "php artisan serve",
+    "internalPort": 80
+  },
+  "rails": {
+    "detect": ["Gemfile", "config.ru"],
+    "type": "backend",
+    "dockerfile": "FROM ruby:3.2-alpine\nRUN apk add --no-cache build-base postgresql-dev nodejs yarn\nWORKDIR /app\nCOPY Gemfile Gemfile.lock ./\nRUN bundle install\nCOPY . .\nRUN bundle exec rake assets:precompile || true\nEXPOSE 3000\nCMD [\"bundle\", \"exec\", \"rails\", \"server\", \"-b\", \"0.0.0.0\"]",
+    "start": "rails server",
+    "internalPort": 3000
+  }
+}
