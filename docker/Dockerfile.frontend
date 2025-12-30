@@ -1,0 +1,17 @@
+# Frontend Dockerfile for Zyphron
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Install dependencies
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm install
+
+# Copy frontend source
+COPY frontend/ .
+
+# Expose port
+EXPOSE 3001
+
+# Development command
+CMD ["npm", "run", "dev"]

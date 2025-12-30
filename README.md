@@ -9,6 +9,19 @@
 
 ---
 
+## 🏗️ Monorepo Structure
+
+```
+zyphron/
+├── src/                    # Backend API (Fastify + TypeScript)
+├── frontend/               # Frontend Web App (Next.js 14)
+├── docker/                 # Docker configurations
+├── prisma/                 # Database schema
+└── docs/                   # Documentation
+```
+
+---
+
 ## Table of Contents
 
 - [Introduction](#introduction)
