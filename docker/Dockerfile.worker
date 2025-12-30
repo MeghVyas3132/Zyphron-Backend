@@ -1,0 +1,72 @@
+# ===========================================
+# ZYPHRON WORKER DOCKERFILE
+# Build worker for processing deployment jobs
+# ===========================================
+
+# ---------------------------------------------
+# Stage 1: Base image with dependencies
+# ---------------------------------------------
+FROM node:20-alpine AS base
+
+# Install system dependencies for builds
+RUN apk add --no-cache \
+    curl \
+    git \
+    python3 \
+    make \
+    g++ \
+    docker-cli \
+    bash \
+    openssh-client \
+    && rm -rf /var/cache/apk/*
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# ---------------------------------------------
+# Stage 2: Development
+# ---------------------------------------------
+FROM base AS development
+
+# Install all dependencies
+RUN npm ci
+
+# Copy source code
+COPY . .
+
+# Generate Prisma client
+RUN npx prisma generate 2>/dev/null || true
+
+# Worker command
+CMD ["npm", "run", "worker:dev"]
+
+# ---------------------------------------------
+# Stage 3: Production
+# ---------------------------------------------
+FROM base AS production
+
+# Install production dependencies
+RUN npm ci --only=production
+
+WORKDIR /app
+
+# Create non-root user (but needs docker access)
+RUN addgroup -g 1001 -S zyphron && \
+    adduser -S zyphron -u 1001 -G zyphron
+
+# Copy built application
+COPY --from=development /app/dist ./dist
+COPY --from=development /app/node_modules ./node_modules
+COPY --from=development /app/package*.json ./
+COPY --from=development /app/prisma ./prisma
+
+# Worker needs docker socket access
+# Note: In production, use rootless docker or adjust permissions
+
+# Health check (workers don't have HTTP, check process)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD pgrep -x node || exit 1
+
+CMD ["node", "dist/worker/index.js"]

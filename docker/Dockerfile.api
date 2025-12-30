@@ -1,0 +1,99 @@
+# ===========================================
+# ZYPHRON API DOCKERFILE
+# Multi-stage build for development and production
+# ===========================================
+
+# ---------------------------------------------
+# Stage 1: Base image with dependencies
+# ---------------------------------------------
+FROM node:20-alpine AS base
+
+# Install system dependencies
+RUN apk add --no-cache \
+    curl \
+    git \
+    python3 \
+    make \
+    g++ \
+    docker-cli \
+    && rm -rf /var/cache/apk/*
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# ---------------------------------------------
+# Stage 2: Development
+# ---------------------------------------------
+FROM base AS development
+
+# Install all dependencies including devDependencies
+RUN npm ci
+
+# Copy source code
+COPY . .
+
+# Generate Prisma client
+RUN npx prisma generate 2>/dev/null || true
+
+# Expose ports
+EXPOSE 3000 9229
+
+# Development command with hot reload
+CMD ["npm", "run", "dev"]
+
+# ---------------------------------------------
+# Stage 3: Builder for production
+# ---------------------------------------------
+FROM base AS builder
+
+# Install production dependencies only
+RUN npm ci --only=production
+
+# Copy source and build
+COPY . .
+
+# Generate Prisma client
+RUN npx prisma generate 2>/dev/null || true
+
+# Build TypeScript
+RUN npm run build 2>/dev/null || true
+
+# ---------------------------------------------
+# Stage 4: Production
+# ---------------------------------------------
+FROM node:20-alpine AS production
+
+# Install only runtime dependencies
+RUN apk add --no-cache \
+    curl \
+    docker-cli \
+    && rm -rf /var/cache/apk/*
+
+WORKDIR /app
+
+# Create non-root user
+RUN addgroup -g 1001 -S zyphron && \
+    adduser -S zyphron -u 1001 -G zyphron
+
+# Copy built application
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package*.json ./
+COPY --from=builder /app/prisma ./prisma
+
+# Set ownership
+RUN chown -R zyphron:zyphron /app
+
+USER zyphron
+
+# Expose port
+EXPOSE 3000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:3000/health || exit 1
+
+# Production command
+CMD ["node", "dist/index.js"]

@@ -1,0 +1,420 @@
+// ===========================================
+// ZYPHRON DATABASE SCHEMA
+// Prisma Schema for PostgreSQL
+// ===========================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ===========================================
+// USER & AUTHENTICATION
+// ===========================================
+
+model User {
+  id            String    @id @default(uuid())
+  email         String    @unique
+  name          String?
+  avatarUrl     String?   @map("avatar_url")
+  githubId      String?   @unique @map("github_id")
+  gitlabId      String?   @unique @map("gitlab_id")
+  bitbucketId   String?   @unique @map("bitbucket_id")
+  
+  // Timestamps
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  lastLoginAt   DateTime? @map("last_login_at")
+  
+  // Relations
+  projects      Project[]
+  teamMembers   TeamMember[]
+  ownedTeams    Team[]    @relation("TeamOwner")
+  apiKeys       ApiKey[]
+  auditLogs     AuditLog[]
+  
+  @@map("users")
+}
+
+model ApiKey {
+  id          String    @id @default(uuid())
+  userId      String    @map("user_id")
+  name        String
+  keyHash     String    @unique @map("key_hash")
+  prefix      String    // First 8 chars for identification
+  lastUsedAt  DateTime? @map("last_used_at")
+  expiresAt   DateTime? @map("expires_at")
+  
+  createdAt   DateTime  @default(now()) @map("created_at")
+  
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@map("api_keys")
+}
+
+// ===========================================
+// TEAM & COLLABORATION
+// ===========================================
+
+model Team {
+  id          String    @id @default(uuid())
+  name        String
+  slug        String    @unique
+  description String?
+  avatarUrl   String?   @map("avatar_url")
+  ownerId     String    @map("owner_id")
+  
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  
+  owner       User      @relation("TeamOwner", fields: [ownerId], references: [id])
+  members     TeamMember[]
+  projects    Project[]
+  
+  @@map("teams")
+}
+
+model TeamMember {
+  id        String   @id @default(uuid())
+  teamId    String   @map("team_id")
+  userId    String   @map("user_id")
+  role      TeamRole @default(DEVELOPER)
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([teamId, userId])
+  @@map("team_members")
+}
+
+enum TeamRole {
+  OWNER
+  ADMIN
+  DEVELOPER
+  VIEWER
+}
+
+// ===========================================
+// PROJECTS
+// ===========================================
+
+model Project {
+  id                String    @id @default(uuid())
+  name              String
+  slug              String
+  description       String?
+  
+  // Repository info
+  repositoryUrl     String    @map("repository_url")
+  repositoryProvider GitProvider @default(GITHUB) @map("repository_provider")
+  branch            String    @default("main")
+  rootDirectory     String?   @map("root_directory")
+  
+  // Detection results
+  framework         String?
+  language          String?
+  projectType       ProjectType @default(UNKNOWN) @map("project_type")
+  
+  // Build configuration
+  buildCommand      String?   @map("build_command")
+  installCommand    String?   @map("install_command")
+  startCommand      String?   @map("start_command")
+  outputDirectory   String?   @map("output_directory")
+  
+  // Deployment settings
+  subdomain         String    @unique
+  customDomain      String?   @unique @map("custom_domain")
+  autoDeploy        Boolean   @default(true) @map("auto_deploy")
+  
+  // Resource limits
+  cpuLimit          String    @default("1") @map("cpu_limit")
+  memoryLimit       String    @default("512Mi") @map("memory_limit")
+  
+  // Ownership
+  userId            String    @map("user_id")
+  teamId            String?   @map("team_id")
+  
+  // Timestamps
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+  
+  // Relations
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  team              Team?     @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  deployments       Deployment[]
+  envVariables      EnvVariable[]
+  databases         Database[]
+  webhooks          Webhook[]
+  
+  @@unique([userId, slug])
+  @@unique([teamId, slug])
+  @@map("projects")
+}
+
+enum GitProvider {
+  GITHUB
+  GITLAB
+  BITBUCKET
+}
+
+enum ProjectType {
+  STATIC
+  BACKEND
+  FULLSTACK
+  UNKNOWN
+}
+
+// ===========================================
+// DEPLOYMENTS
+// ===========================================
+
+model Deployment {
+  id            String           @id @default(uuid())
+  projectId     String           @map("project_id")
+  
+  // Deployment info
+  status        DeploymentStatus @default(QUEUED)
+  trigger       DeploymentTrigger @default(MANUAL)
+  
+  // Git info
+  commitSha     String?          @map("commit_sha")
+  commitMessage String?          @map("commit_message")
+  commitAuthor  String?          @map("commit_author")
+  branch        String?
+  
+  // Build info
+  imageTag      String?          @map("image_tag")
+  buildLogs     String?          @map("build_logs") @db.Text
+  
+  // Timing
+  queuedAt      DateTime         @default(now()) @map("queued_at")
+  startedAt     DateTime?        @map("started_at")
+  completedAt   DateTime?        @map("completed_at")
+  
+  // Metrics
+  buildDuration Int?             @map("build_duration") // seconds
+  deployDuration Int?            @map("deploy_duration") // seconds
+  
+  // Error handling
+  errorMessage  String?          @map("error_message") @db.Text
+  errorCode     String?          @map("error_code")
+  
+  // Metadata
+  metadata      Json?
+  
+  // Timestamps
+  createdAt     DateTime         @default(now()) @map("created_at")
+  updatedAt     DateTime         @updatedAt @map("updated_at")
+  
+  // Relations
+  project       Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  
+  @@index([projectId, status])
+  @@index([createdAt])
+  @@map("deployments")
+}
+
+enum DeploymentStatus {
+  QUEUED
+  BUILDING
+  DEPLOYING
+  LIVE
+  FAILED
+  CANCELLED
+  ROLLING_BACK
+}
+
+enum DeploymentTrigger {
+  MANUAL
+  GIT_PUSH
+  WEBHOOK
+  ROLLBACK
+  SCHEDULED
+  API
+}
+
+// ===========================================
+// ENVIRONMENT VARIABLES
+// ===========================================
+
+model EnvVariable {
+  id          String      @id @default(uuid())
+  projectId   String      @map("project_id")
+  
+  key         String
+  value       String      @db.Text // Encrypted at application level
+  environment Environment @default(PRODUCTION)
+  isSecret    Boolean     @default(false) @map("is_secret")
+  
+  createdAt   DateTime    @default(now()) @map("created_at")
+  updatedAt   DateTime    @updatedAt @map("updated_at")
+  
+  project     Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  
+  @@unique([projectId, key, environment])
+  @@map("env_variables")
+}
+
+enum Environment {
+  DEVELOPMENT
+  PREVIEW
+  STAGING
+  PRODUCTION
+}
+
+// ===========================================
+// DATABASES
+// ===========================================
+
+model Database {
+  id              String         @id @default(uuid())
+  projectId       String         @map("project_id")
+  
+  name            String
+  type            DatabaseType
+  version         String
+  
+  // Connection info (encrypted)
+  host            String?
+  port            Int?
+  username        String?
+  password        String?        @db.Text
+  connectionString String?       @map("connection_string") @db.Text
+  
+  // Resources
+  storageGb       Int            @default(1) @map("storage_gb")
+  
+  // Status
+  status          DatabaseStatus @default(PROVISIONING)
+  
+  // Timestamps
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+  
+  project         Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  
+  @@map("databases")
+}
+
+enum DatabaseType {
+  POSTGRESQL
+  MYSQL
+  MONGODB
+  REDIS
+}
+
+enum DatabaseStatus {
+  PROVISIONING
+  ACTIVE
+  SUSPENDED
+  DELETED
+  ERROR
+}
+
+// ===========================================
+// WEBHOOKS
+// ===========================================
+
+model Webhook {
+  id          String    @id @default(uuid())
+  projectId   String    @map("project_id")
+  
+  provider    GitProvider
+  webhookId   String    @map("webhook_id")
+  secret      String    @db.Text
+  events      String[]  // push, pull_request, etc.
+  
+  isActive    Boolean   @default(true) @map("is_active")
+  
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  
+  project     Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  
+  @@unique([provider, webhookId])
+  @@map("webhooks")
+}
+
+// ===========================================
+// AUDIT LOGS
+// ===========================================
+
+model AuditLog {
+  id           String    @id @default(uuid())
+  userId       String?   @map("user_id")
+  
+  action       String
+  resourceType String    @map("resource_type")
+  resourceId   String?   @map("resource_id")
+  
+  metadata     Json?
+  ipAddress    String?   @map("ip_address")
+  userAgent    String?   @map("user_agent")
+  
+  createdAt    DateTime  @default(now()) @map("created_at")
+  
+  user         User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  
+  @@index([userId])
+  @@index([resourceType, resourceId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ===========================================
+// BUILD QUEUE (for tracking)
+// ===========================================
+
+model BuildJob {
+  id            String      @id @default(uuid())
+  deploymentId  String      @unique @map("deployment_id")
+  
+  priority      Int         @default(0)
+  attempts      Int         @default(0)
+  maxAttempts   Int         @default(3) @map("max_attempts")
+  
+  status        JobStatus   @default(PENDING)
+  
+  startedAt     DateTime?   @map("started_at")
+  completedAt   DateTime?   @map("completed_at")
+  failedAt      DateTime?   @map("failed_at")
+  
+  error         String?     @db.Text
+  result        Json?
+  
+  createdAt     DateTime    @default(now()) @map("created_at")
+  updatedAt     DateTime    @updatedAt @map("updated_at")
+  
+  @@index([status, priority])
+  @@map("build_jobs")
+}
+
+enum JobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+// ===========================================
+// SYSTEM CONFIGURATION
+// ===========================================
+
+model SystemConfig {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  value     Json
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  
+  @@map("system_config")
+}
