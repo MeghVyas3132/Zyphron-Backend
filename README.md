@@ -13,12 +13,23 @@
 
 ```
 zyphron/
-├── src/                    # Backend API (Fastify + TypeScript)
+├── backend/                # Backend API (Fastify + TypeScript)
+│   ├── src/               # Source code
+│   ├── prisma/            # Database schema
+│   └── package.json       # Backend dependencies
 ├── frontend/               # Frontend Web App (Next.js 14)
+│   ├── src/               # Source code
+│   └── package.json       # Frontend dependencies
 ├── docker/                 # Docker configurations
-├── prisma/                 # Database schema
-└── docs/                   # Documentation
+├── docs/                   # Documentation (PRD, TRD)
+├── docker-compose.dev.yml  # Development environment
+└── README.md
 ```
+
+**Future Services (Planned):**
+- `ai-service/` - AI/ML service for code analysis and suggestions
+- `infrastructure/` - Terraform/Pulumi IaC configurations
+- `sdk/` - Client SDKs for various languages
 
 ---
 

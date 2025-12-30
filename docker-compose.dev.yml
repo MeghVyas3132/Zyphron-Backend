@@ -59,9 +59,10 @@ services:
       - BASE_DOMAIN=localhost
       - LOG_LEVEL=debug
     volumes:
-      - ./src:/app/src:ro
-      - ./package.json:/app/package.json:ro
-      - ./tsconfig.json:/app/tsconfig.json:ro
+      - ./backend/src:/app/src:ro
+      - ./backend/package.json:/app/package.json:ro
+      - ./backend/tsconfig.json:/app/tsconfig.json:ro
+      - ./backend/prisma:/app/prisma:ro
       - projects_data:/var/www/projects
       - /var/run/docker.sock:/var/run/docker.sock  # Docker-in-Docker for builds
     depends_on:
@@ -99,9 +100,10 @@ services:
       - CONTAINER_REGISTRY=registry:5000
       - LOG_LEVEL=debug
     volumes:
-      - ./src:/app/src:ro
-      - ./package.json:/app/package.json:ro
-      - ./tsconfig.json:/app/tsconfig.json:ro
+      - ./backend/src:/app/src:ro
+      - ./backend/package.json:/app/package.json:ro
+      - ./backend/tsconfig.json:/app/tsconfig.json:ro
+      - ./backend/prisma:/app/prisma:ro
       - projects_data:/var/www/projects
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:

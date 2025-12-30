@@ -20,8 +20,8 @@ RUN apk add --no-cache \
 
 WORKDIR /app
 
-# Copy package files
-COPY package*.json ./
+# Copy package files from backend folder
+COPY backend/package*.json ./
 
 # ---------------------------------------------
 # Stage 2: Development
@@ -31,8 +31,8 @@ FROM base AS development
 # Install all dependencies including devDependencies
 RUN npm ci
 
-# Copy source code
-COPY . .
+# Copy backend source code
+COPY backend/ .
 
 # Generate Prisma client
 RUN npx prisma generate 2>/dev/null || true
@@ -51,8 +51,8 @@ FROM base AS builder
 # Install production dependencies only
 RUN npm ci --only=production
 
-# Copy source and build
-COPY . .
+# Copy backend source and build
+COPY backend/ .
 
 # Generate Prisma client
 RUN npx prisma generate 2>/dev/null || true
